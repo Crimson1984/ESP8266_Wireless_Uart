@@ -1,0 +1,44 @@
+You are an expert Embedded Systems Firmware Engineer specializing in Espressif chips.
+Please write the complete, production-ready code for a "Bidirectional Wireless UART Bridge" using ESP-NOW on the ESP8266.
+
+Target Environment:
+- IDE: PlatformIO(the framework is already inited)
+- Framework: ESP8266 RTOS SDK (NOT Arduino)
+- Hardware: ESP-01s (ESP8266EX, 1MB Flash)
+
+Core Requirements & Optimizations (MUST IMPLEMENT):
+1. Wi-Fi Initialization:
+   - Initialize NVS and Wi-Fi in STA mode. DO NOT connect to any AP.
+   - Force Wi-Fi channel to 1 using `esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE)`.
+   - MUST call `esp_wifi_set_ps(WIFI_PS_NONE)` to disable power saving for extreme low latency.
+   - Optional: Boost PHY rate to 54M using `esp_wifi_config_espnow_rate`.
+
+2. ESP-NOW Setup:
+   - Initialize ESP-NOW. Use Broadcast MAC {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF} as the peer for easy pairing.
+   - Keep optional specified MAC address Config.
+
+3. Custom Payload (Deduplication Logic):
+   - Define custom struct:
+     typedef struct {
+         uint8_t seq_num;
+         uint8_t data_len;
+         uint8_t data[248];
+     } __attribute__((packed)) uart_now_packet_t;
+   - The receiver MUST check `seq_num` against the last received `seq_num` to drop hardware-retransmitted duplicate packets.
+
+4. TX Flow Control (Crucial for stability):
+   - Declare a volatile boolean `can_send_next = true;`.
+   - In the ESP-NOW TX callback, set `can_send_next = true;` unconditionally.
+   - The TX task must wait for `can_send_next` to be true before calling `esp_now_send` to prevent NO_MEM crashes.
+
+5. FreeRTOS Tasks & UART:
+   - Use `driver/uart.h` for UART0 (Baud: 115200, 8N1).
+   - Task 1 (uart_to_air): Read UART using `uart_read_bytes` (10ms timeout). If data exists and `can_send_next` is true, increment `seq_num`, pack it, set `can_send_next = false`, and send via ESP-NOW.
+   - Task 2 (air_to_uart): Block on a FreeRTOS Queue. Receive packet, deduplicate using `seq_num`, and write to UART using `uart_write_bytes`.
+   - RX Callback: Copy incoming data to `uart_now_packet_t` and `xQueueSendFromISR` (or `xQueueSend` with 0 block time) to the queue.
+
+Output Formatting:
+Please provide ONLY the raw code for the following two files, clearly separated:
+1. `platformio.ini` (Include upload_speed = 115200, monitor_speed = 115200, and ensure board is esp01_1m).
+2. `src/main.c` (Include all necessary headers, `app_main()` function, and everything described above).
+3. moduled format of codes, sort it well.

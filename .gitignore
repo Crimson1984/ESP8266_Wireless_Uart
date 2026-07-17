@@ -1,5 +1,35 @@
-.pio
+# ==========================================================================
+# ESP8266_RTOS_SDK (native cmake/make) build artifacts
+# ==========================================================================
+build/
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# menuconfig backups
+sdkconfig.defaults.old
+
+# ==========================================================================
+# PlatformIO leftovers (project migrated to native SDK build)
+# ==========================================================================
+.pio/
+
+# ==========================================================================
+# Editor / IDE
+# ==========================================================================
+# VS Code: ignore the machine-generated files, keep curated extensions.json.
 .vscode/.browse.c_cpp.db*
 .vscode/c_cpp_properties.json
 .vscode/launch.json
-.vscode/ipch
+.vscode/ipch/
+.vscode/settings.json
+
+# Claude Code local session / agent state (never shared).
+.claude/
+
+# ==========================================================================
+# OS clutter
+# ==========================================================================
+Thumbs.db
+.DS_Store
