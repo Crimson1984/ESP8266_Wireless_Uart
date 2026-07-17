@@ -14,6 +14,7 @@ This project targets the ESP8266EX with 1 MB flash and uses the native ESP8266_R
 - Sequence-number deduplication for retransmitted ESP-NOW frames.
 - FreeRTOS queue between the Wi-Fi receive callback and UART output task.
 - Maximum 248 UART data bytes per 250-byte ESP-NOW packet.
+- ESP-01s GPIO2 onboard LED indicates accepted TX and delivered RX activity.
 - Runtime SDK logging disabled to keep UART0 data clean.
 - Standalone PowerShell build, flash, and monitor workflow.
 
@@ -29,7 +30,7 @@ Connect each module as follows:
 | GND | Common ground |
 | EN / CH_PD | Pull up to 3.3 V |
 | GPIO0 | Pull up for normal boot; pull low while resetting to flash |
-| GPIO2 | Pull up for normal boot |
+| GPIO2 | Pull up for normal boot; reused as an active-low onboard activity LED after startup |
 | TXD / GPIO1 | UART output to the attached device's RX |
 | RXD / GPIO3 | UART input from the attached device's TX |
 
@@ -112,6 +113,7 @@ Both endpoints must use the same Wi-Fi channel and UART settings.
 
 - The bridge provides packet deduplication but no application-level acknowledgment, retry, encryption, or guaranteed delivery.
 - Broadcast mode may be received by every compatible bridge in range on channel 1.
+- The common ESP-01s onboard LED is active-low on GPIO2. Continuous traffic may keep it visibly illuminated because nearby events extend the 30 ms pulse.
 - UART bytes already removed from the local receive buffer are lost if `esp_now_send()` immediately rejects a frame. The flow-control gate minimizes this condition but does not make the protocol lossless.
 - The ESP8266 ROM emits a short boot message on UART0 during reset. Runtime SDK logging is disabled after startup, but the ROM message cannot be suppressed by application code.
 - A sender restart resets its 8-bit sequence counter. The receiver only drops consecutive duplicate sequence numbers, so normal counter wraparound is accepted.

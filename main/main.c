@@ -13,11 +13,12 @@
  *   [1] Configuration      - tunables, MACs, packet struct
  *   [2] Globals            - shared state (flow-control flag, queue, seq)
  *   [3] Wi-Fi module       - STA init, channel lock, power-save off
- *   [4] ESP-NOW module     - init, peer setup, TX/RX callbacks
+ *   [4] ESP-NOW callbacks  - non-blocking Wi-Fi task callbacks
  *   [5] ESP-NOW module     - initialization and peer registration
- *   [6] UART module        - UART0 driver install
- *   [7] Tasks              - uart_to_air (TX) and air_to_uart (RX)
- *   [8] app_main           - wire everything together
+ *   [6] Activity LED       - non-blocking GPIO2 TX/RX indication
+ *   [7] UART module        - UART0 driver install
+ *   [8] Tasks              - uart_to_air (TX) and air_to_uart (RX)
+ *   [9] app_main           - wire everything together
  */
 
 /* ---- Standard / RTOS ---- */
@@ -33,6 +34,7 @@
 #include "esp_wifi.h"
 #include "esp_now.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "driver/uart.h"
 
 /* ========================================================================
@@ -59,6 +61,12 @@
 #define WUART_UART_TX_BUF       1024
 #define WUART_UART_READ_TMO_MS  10           /* uart_read_bytes timeout     */
 
+/* ESP-01s onboard activity LED: GPIO2, active-low on common board revisions. */
+#define WUART_LED_GPIO          GPIO_NUM_2
+#define WUART_LED_ON_LEVEL      0
+#define WUART_LED_OFF_LEVEL     1
+#define WUART_LED_PULSE_MS      30
+
 /* RX queue depth (air -> uart) */
 #define WUART_RX_QUEUE_LEN      8
 
@@ -66,6 +74,8 @@
 #define WUART_TASK_STACK        2048
 #define WUART_TX_TASK_PRIO      5
 #define WUART_RX_TASK_PRIO      5
+#define WUART_LED_TASK_STACK    1024
+#define WUART_LED_TASK_PRIO     3
 
 /*
  * ESP-NOW payload. Max ESP-NOW frame is 250 bytes (ESP_NOW_MAX_DATA_LEN).
@@ -112,6 +122,9 @@ static uint8_t g_tx_seq = 0;
 
 /* air -> uart handoff: RX callback (Wi-Fi task) -> air_to_uart task. */
 static QueueHandle_t g_rx_queue = NULL;
+
+/* TX/RX activity notification target. GPIO access is owned by this task. */
+static TaskHandle_t g_led_task = NULL;
 
 /* Effective destination MAC for sends (broadcast or fixed peer). */
 static const uint8_t *tx_dest_mac(void)
@@ -219,7 +232,61 @@ static void wuart_espnow_init(void)
 }
 
 /* ========================================================================
- * [6] UART MODULE
+ * [6] ACTIVITY LED MODULE
+ * ==================================================================== */
+
+/*
+ * Report activity without delaying the caller. Task notifications are used
+ * instead of sleeping in the UART or Wi-Fi paths. Multiple events within the
+ * pulse window are coalesced and extend the visible LED pulse.
+ */
+static void wuart_led_activity(void)
+{
+    if (g_led_task != NULL) {
+        (void)xTaskNotifyGive(g_led_task);
+    }
+}
+
+static void wuart_led_task(void *arg)
+{
+    (void)arg;
+
+    ESP_ERROR_CHECK(gpio_set_level(WUART_LED_GPIO, WUART_LED_OFF_LEVEL));
+
+    for (;;) {
+        /* Wait indefinitely for the first TX or RX event. */
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ESP_ERROR_CHECK(gpio_set_level(WUART_LED_GPIO, WUART_LED_ON_LEVEL));
+
+        /* Keep the LED lit until traffic has been idle for one pulse period. */
+        while (ulTaskNotifyTake(pdTRUE,
+                                pdMS_TO_TICKS(WUART_LED_PULSE_MS)) > 0) {
+        }
+
+        ESP_ERROR_CHECK(gpio_set_level(WUART_LED_GPIO, WUART_LED_OFF_LEVEL));
+    }
+}
+
+static void wuart_led_init(void)
+{
+    gpio_config_t led_cfg = {
+        .pin_bit_mask = (1U << WUART_LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&led_cfg));
+    ESP_ERROR_CHECK(gpio_set_level(WUART_LED_GPIO, WUART_LED_OFF_LEVEL));
+
+    BaseType_t created = xTaskCreate(wuart_led_task, "activity_led",
+                                     WUART_LED_TASK_STACK, NULL,
+                                     WUART_LED_TASK_PRIO, &g_led_task);
+    configASSERT(created == pdPASS);
+}
+
+/* ========================================================================
+ * [7] UART MODULE
  * ==================================================================== */
 
 /*
@@ -250,7 +317,7 @@ static void wuart_uart_init(void)
 }
 
 /* ========================================================================
- * [7] TASKS
+ * [8] TASKS
  * ==================================================================== */
 
 /*
@@ -296,6 +363,9 @@ static void uart_to_air_task(void *arg)
             /* Send was rejected: re-arm so we can retry the next byte batch. */
             ESP_LOGW(TAG, "esp_now_send failed: %d", err);
             g_can_send_next = true;
+        } else {
+            /* Indicate a frame accepted by the ESP-NOW transmit subsystem. */
+            wuart_led_activity();
         }
     }
 }
@@ -328,13 +398,15 @@ static void air_to_uart_task(void *arg)
         last_seq = pkt.seq_num;
 
         if (pkt.data_len > 0 && pkt.data_len <= WUART_MAX_DATA) {
+            /* Blink only for valid, non-duplicate data delivered to UART. */
+            wuart_led_activity();
             uart_write_bytes(WUART_UART_PORT, (const char *)pkt.data, pkt.data_len);
         }
     }
 }
 
 /* ========================================================================
- * [8] app_main
+ * [9] app_main
  * ==================================================================== */
 
 void app_main(void)
@@ -360,6 +432,7 @@ void app_main(void)
     g_rx_queue = xQueueCreate(WUART_RX_QUEUE_LEN, sizeof(uart_now_packet_t));
     configASSERT(g_rx_queue != NULL);
 
+    wuart_led_init();
     wuart_wifi_init();
     wuart_espnow_init();
     wuart_uart_init();
